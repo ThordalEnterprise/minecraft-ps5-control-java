@@ -12,16 +12,20 @@ This bridge translates DualSense input into keyboard/mouse events so Minecraft J
 ## Features
 - Left stick movement (W/A/S/D)
 - Right stick camera look (mouse movement)
-- R2 = attack (left click)
-- L2 = use/place (right click)
+- R2 = `P` key
+- L2 = `O` key
 - X/Cross = jump
 - Circle = sneak
 - L3 click = sprint
 - Triangle = inventory
 - Share = swap hands
 - Options = pause/ESC
-- L1/R1 = hotbar scroll (mouse wheel, repeat while held)
-- D-pad up/down = hotbar scroll
+- L1/R1 = hotbar slot cycling (mouse wheel, one slot per tap)
+- D-pad up = F5 perspective toggle
+- D-pad down = hotbar scroll
+- D-pad left = Q/drop
+- D-pad right = U
+- Cursor anchor mode for multi-monitor setups
 
 ## Works with
 - macOS
@@ -62,6 +66,11 @@ Debug triggers:
 python3 ps5_minecraft_bridge.py --debug-triggers
 ```
 
+Disable cursor anchoring:
+```bash
+python3 ps5_minecraft_bridge.py --no-lock-cursor
+```
+
 Input test mode (see button/axis indexes):
 ```bash
 python3 ps5_minecraft_bridge.py --test-inputs
@@ -82,8 +91,8 @@ If your camera or triggers feel wrong on your setup, run `--test-inputs` and upd
 |---|---|
 | Left stick | Move |
 | Right stick | Look |
-| R2 | Attack |
-| L2 | Use/Place |
+| R2 | P key |
+| L2 | O key |
 | Cross (X) | Jump |
 | Circle | Sneak |
 | L3 (press) | Sprint |
@@ -91,18 +100,25 @@ If your camera or triggers feel wrong on your setup, run `--test-inputs` and upd
 | Square | Drop |
 | Share | Swap hands |
 | Options | ESC / Pause |
-| L1 | Hotbar previous |
-| R1 | Hotbar next |
-| D-pad up/down | Hotbar scroll |
+| L1 | Hotbar previous slot |
+| R1 | Hotbar next slot |
+| D-pad up | F5 / perspective |
+| D-pad down | Hotbar scroll down |
+| D-pad left | Q / drop |
+| D-pad right | U key |
 
 ## Troubleshooting
 - Camera not moving:
   - Verify Accessibility permission.
   - Try `--mouse-backend pynput`.
   - Check `controller_axes.rx/ry` in config.
-- Trigger clicks not working:
+- Trigger keys not working:
   - Use `--debug-triggers`.
   - Confirm `controller_axes.l2/r2` indexes.
+- Cursor drifts onto another monitor:
+  - Start the bridge with the cursor inside the Minecraft window.
+  - Leave cursor anchoring enabled, which is the default.
+  - Use `--no-lock-cursor` only if you want raw cursor movement.
 - Wrong button mapping:
   - Run `--test-inputs` and update `controller_buttons`.
 

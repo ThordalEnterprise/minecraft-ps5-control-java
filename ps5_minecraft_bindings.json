@@ -8,8 +8,8 @@
     "sneak": "shift",
     "sprint": "ctrl",
     "inventory": "e",
-    "drop": "f",
-    "swap_hands": "q",
+    "drop": "q",
+    "swap_hands": "f",
     "esc": "esc"
   },
   "controller_buttons": {

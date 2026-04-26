@@ -19,7 +19,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import pygame
 from pynput.keyboard import Controller as KeyboardController, Key
@@ -32,6 +32,7 @@ try:
         CGEventGetLocation,
         CGEventPost,
         CGEventSetIntegerValueField,
+        CGWarpMouseCursorPosition,
         kCGEventLeftMouseDown,
         kCGEventLeftMouseUp,
         kCGEventMouseMoved,
@@ -95,20 +96,22 @@ DEFAULT_AXIS_MAP = {
 @dataclass
 class Settings:
     deadzone_move: float = 0.20
-    deadzone_look: float = 0.05
+    deadzone_look: float = 0.03
     look_sensitivity: float = 28.0
     poll_hz: int = 120
     trigger_threshold: float = 0.35
     trigger_delta_threshold: float = 0.35
-    scroll_cooldown_s: float = 0.15
+    scroll_cooldown_s: float = 0.25
 
 
 class MouseBackend:
-    def __init__(self, mode: str = "auto") -> None:
+    def __init__(self, mode: str = "auto", lock_cursor: bool = True) -> None:
         self.mode = mode
+        self.lock_cursor = lock_cursor
         self.pynput_mouse = MouseController()
         self.left_down = False
         self.right_down = False
+        self.anchor_pos: Optional[Tuple[float, float]] = None
 
         if self.mode == "auto":
             self.mode = "quartz" if CGEventCreate is not None else "pynput"
@@ -117,6 +120,8 @@ class MouseBackend:
 
     def move(self, dx: int, dy: int) -> None:
         if self.mode == "quartz":
+            if self.lock_cursor and self.anchor_pos is None:
+                self.anchor_pos = self._current_pos()
             x, y = self._current_pos()
             event = CGEventCreateMouseEvent(
                 None, kCGEventMouseMoved, (x + dx, y + dy), kCGMouseButtonLeft
@@ -125,27 +130,47 @@ class MouseBackend:
             CGEventSetIntegerValueField(event, kCGMouseEventDeltaY, dy)
             CGEventPost(kCGHIDEventTap, event)
             return
+        if self.lock_cursor and self.anchor_pos is None:
+            self.anchor_pos = self._current_pos()
         self.pynput_mouse.move(dx, dy)
 
     def scroll(self, dy: int) -> None:
         self.pynput_mouse.scroll(0, dy)
 
     def _current_pos(self) -> Tuple[float, float]:
+        if self.mode != "quartz" or CGEventCreate is None:
+            x, y = self.pynput_mouse.position
+            return float(x), float(y)
         event = CGEventCreate(None)
         loc = CGEventGetLocation(event)
         return loc.x, loc.y
+
+    def _anchor_pos(self) -> Tuple[float, float]:
+        if self.anchor_pos is None:
+            self.anchor_pos = self._current_pos()
+        return self.anchor_pos
+
+    def _restore_anchor(self) -> None:
+        if not self.lock_cursor or self.anchor_pos is None:
+            return
+        if self.mode == "quartz":
+            CGWarpMouseCursorPosition(self.anchor_pos)
+            return
+        self.pynput_mouse.position = self.anchor_pos
 
     def press_left(self) -> None:
         if self.left_down:
             return
         self.left_down = True
         if self.mode == "quartz":
-            x, y = self._current_pos()
+            x, y = self._anchor_pos() if self.lock_cursor else self._current_pos()
+            self._restore_anchor()
             event = CGEventCreateMouseEvent(
                 None, kCGEventLeftMouseDown, (x, y), kCGMouseButtonLeft
             )
             CGEventPost(kCGHIDEventTap, event)
             return
+        self._restore_anchor()
         self.pynput_mouse.press(Button.left)
 
     def release_left(self) -> None:
@@ -153,12 +178,14 @@ class MouseBackend:
             return
         self.left_down = False
         if self.mode == "quartz":
-            x, y = self._current_pos()
+            x, y = self._anchor_pos() if self.lock_cursor else self._current_pos()
+            self._restore_anchor()
             event = CGEventCreateMouseEvent(
                 None, kCGEventLeftMouseUp, (x, y), kCGMouseButtonLeft
             )
             CGEventPost(kCGHIDEventTap, event)
             return
+        self._restore_anchor()
         self.pynput_mouse.release(Button.left)
 
     def press_right(self) -> None:
@@ -166,12 +193,14 @@ class MouseBackend:
             return
         self.right_down = True
         if self.mode == "quartz":
-            x, y = self._current_pos()
+            x, y = self._anchor_pos() if self.lock_cursor else self._current_pos()
+            self._restore_anchor()
             event = CGEventCreateMouseEvent(
                 None, kCGEventRightMouseDown, (x, y), kCGMouseButtonRight
             )
             CGEventPost(kCGHIDEventTap, event)
             return
+        self._restore_anchor()
         self.pynput_mouse.press(Button.right)
 
     def release_right(self) -> None:
@@ -179,12 +208,14 @@ class MouseBackend:
             return
         self.right_down = False
         if self.mode == "quartz":
-            x, y = self._current_pos()
+            x, y = self._anchor_pos() if self.lock_cursor else self._current_pos()
+            self._restore_anchor()
             event = CGEventCreateMouseEvent(
                 None, kCGEventRightMouseUp, (x, y), kCGMouseButtonRight
             )
             CGEventPost(kCGHIDEventTap, event)
             return
+        self._restore_anchor()
         self.pynput_mouse.release(Button.right)
 
 
@@ -324,6 +355,17 @@ def axis_to_bool_pair(value: float) -> Tuple[bool, bool]:
     return value < 0.0, value > 0.0
 
 
+def accumulate_mouse_delta(carry: float, axis_value: float, sensitivity: float) -> Tuple[int, float]:
+    """
+    Convert analog look input into integer mouse deltas without dropping
+    subpixel movement each frame.
+    """
+    carry += axis_value * sensitivity
+    move = int(carry)
+    carry -= move
+    return move, carry
+
+
 def calibrate_trigger_rest(
     joy: pygame.joystick.Joystick, axis_map: Dict[str, int], samples: int = 20
 ) -> Tuple[float, float]:
@@ -379,6 +421,7 @@ def main() -> int:
     parser.add_argument("--debug-look", action="store_true")
     parser.add_argument("--debug-triggers", action="store_true")
     parser.add_argument("--mouse-backend", choices=["auto", "pynput", "quartz"], default="auto")
+    parser.add_argument("--no-lock-cursor", action="store_true")
     args = parser.parse_args()
 
     settings = Settings(look_sensitivity=args.look_sensitivity, poll_hz=args.poll_hz)
@@ -405,17 +448,20 @@ def main() -> int:
     print("Focus Minecraft window. Press Ctrl+C here to stop.")
     print(f"Using config: {config_path}")
     print(f"Using axes: {axis_map}")
+    print(f"Cursor lock: {'off' if args.no_lock_cursor else 'on'}")
     l2_rest, r2_rest = calibrate_trigger_rest(joy, axis_map)
     print(f"Trigger rest values: L2={l2_rest:.2f}, R2={r2_rest:.2f}")
 
     keyboard = KeyboardController()
-    mouse = MouseBackend(args.mouse_backend)
+    mouse = MouseBackend(args.mouse_backend, lock_cursor=not args.no_lock_cursor)
     keys = KeyState(keyboard)
 
     # Track button states for edge-triggered actions
     last_buttons: Dict[int, bool] = {}
     last_hat = (0, 0)
     last_scroll_at = 0.0
+    look_carry_x = 0.0
+    look_carry_y = 0.0
 
     dt_target = 1.0 / max(30, settings.poll_hz)
 
@@ -466,27 +512,34 @@ def main() -> int:
 
             # Camera look as relative mouse movement
             # Small values are rounded, keeping smoother behavior.
-            move_x = int(round(rx * settings.look_sensitivity))
-            move_y = int(round(ry * settings.look_sensitivity))
+            move_x, look_carry_x = accumulate_mouse_delta(
+                look_carry_x, rx, settings.look_sensitivity
+            )
+            move_y, look_carry_y = accumulate_mouse_delta(
+                look_carry_y, ry, settings.look_sensitivity
+            )
             if move_x != 0 or move_y != 0:
                 mouse.move(move_x, move_y)
                 if args.debug_look:
-                    print(f"look rx={rx:.2f} ry={ry:.2f} -> dx={move_x} dy={move_y}")
+                    print(
+                        f"look rx={rx:.2f} ry={ry:.2f} -> "
+                        f"dx={move_x} dy={move_y} carry=({look_carry_x:.2f},{look_carry_y:.2f})"
+                    )
 
-            # Triggers as mouse buttons (user mapping):
-            # R2 -> left click, L2 -> right click
+            # Triggers as keyboard buttons (user mapping):
+            # R2 -> P, L2 -> O
             # Use delta from calibrated idle values so this works across
             # trigger ranges/inversion differences.
             attack_down = abs(r2 - r2_rest) > settings.trigger_delta_threshold
             use_down = abs(l2 - l2_rest) > settings.trigger_delta_threshold
             if attack_down:
-                mouse.press_left()
+                keys.press("p")
             else:
-                mouse.release_left()
+                keys.release("p")
             if use_down:
-                mouse.press_right()
+                keys.press("o")
             else:
-                mouse.release_right()
+                keys.release("o")
             if args.debug_triggers:
                 print(
                     f"triggers L2={l2:.2f} (rest {l2_rest:.2f}) "
@@ -537,9 +590,15 @@ def main() -> int:
 
             # Shoulder buttons: hotbar cycle (scroll while held)
             now_ts = time.time()
-            if now_ts - last_scroll_at >= settings.scroll_cooldown_s:
-                l1_down = current_buttons.get(BTN_L1, False)
-                r1_down = current_buttons.get(BTN_R1, False)
+            l1_down = current_buttons.get(BTN_L1, False)
+            r1_down = current_buttons.get(BTN_R1, False)
+            if pressed_once(BTN_L1):
+                mouse.scroll(1)
+                last_scroll_at = now_ts
+            elif pressed_once(BTN_R1):
+                mouse.scroll(-1)
+                last_scroll_at = now_ts
+            elif now_ts - last_scroll_at >= settings.scroll_cooldown_s:
                 if l1_down:
                     mouse.scroll(1)
                     last_scroll_at = now_ts
@@ -553,32 +612,51 @@ def main() -> int:
             dpad_used = False
             if joy.get_numhats() > 0:
                 hat = joy.get_hat(0)
-                if hat != last_hat and now_ts - last_scroll_at >= settings.scroll_cooldown_s:
-                    if hat[1] > 0:
-                        mouse.scroll(1)
-                        last_scroll_at = now_ts
+                if hat != last_hat:
+                    # D-pad up toggles perspective (F5)
+                    if hat[1] > 0 and last_hat[1] <= 0:
+                        keyboard.press(Key.f5)
+                        keyboard.release(Key.f5)
                         dpad_used = True
-                    elif hat[1] < 0:
+                    # D-pad down scrolls hotbar
+                    elif hat[1] < 0 and now_ts - last_scroll_at >= settings.scroll_cooldown_s:
                         mouse.scroll(-1)
                         last_scroll_at = now_ts
                         dpad_used = True
+                    # D-pad left drops item (Q)
+                    if hat[0] < 0 and last_hat[0] >= 0:
+                        keyboard.press("q")
+                        keyboard.release("q")
+                        dpad_used = True
+                    # D-pad right sends U
+                    if hat[0] > 0 and last_hat[0] <= 0:
+                        keyboard.press("u")
+                        keyboard.release("u")
+                        dpad_used = True
                 last_hat = hat
 
-            if not dpad_used and now_ts - last_scroll_at >= settings.scroll_cooldown_s:
+            if not dpad_used:
                 dpad_up = button_map.get("dpad_up", -1)
                 dpad_down = button_map.get("dpad_down", -1)
+                dpad_left = button_map.get("dpad_left", -1)
+                dpad_right = button_map.get("dpad_right", -1)
                 if dpad_up >= 0 and pressed_once(dpad_up):
-                    mouse.scroll(1)
-                    last_scroll_at = now_ts
-                elif dpad_down >= 0 and pressed_once(dpad_down):
+                    keyboard.press(Key.f5)
+                    keyboard.release(Key.f5)
+                elif (
+                    dpad_down >= 0
+                    and pressed_once(dpad_down)
+                    and now_ts - last_scroll_at >= settings.scroll_cooldown_s
+                ):
                     mouse.scroll(-1)
                     last_scroll_at = now_ts
+                elif dpad_left >= 0 and pressed_once(dpad_left):
+                    keyboard.press("q")
+                    keyboard.release("q")
+                elif dpad_right >= 0 and pressed_once(dpad_right):
+                    keyboard.press("u")
+                    keyboard.release("u")
 
-            # D-pad right can be used as a quick "Q" action (swap_hands binding).
-            dpad_right = button_map.get("dpad_right", -1)
-            if dpad_right >= 0 and pressed_once(dpad_right):
-                keyboard.press(bindings["swap_hands"])
-                keyboard.release(bindings["swap_hands"])
             last_buttons = current_buttons
 
             elapsed = time.perf_counter() - frame_start
